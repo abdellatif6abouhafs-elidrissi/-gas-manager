@@ -1,0 +1,590 @@
+// GasManager Enterprise Database Schema
+// Designed for Moroccan gas station operations (multi-pump, multi-tank, multi-user)
+// Supports: Shift reconciliation, inventory tracking, cash management, end-of-day reporting
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================================
+// USERS & ROLES (RBAC)
+// ============================================================================
+
+enum UserRole {
+  DIRECTEUR    // Station owner - full access, reports, settings
+  GERANT       // Station manager - shift management, daily operations
+  POMPISTE     // Pump attendant - record sales, cash handling
+  ADMIN        // System admin - super access
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+model User {
+  id              String      @id @default(cuid())
+  email           String      @unique
+  password        String      // bcryptjs hashed
+  firstName       String
+  lastName        String
+  phone           String?     @unique
+  role            UserRole
+  status          UserStatus  @default(ACTIVE)
+
+  // Association
+  stationId       String?
+  station         Station?    @relation(fields: [stationId], references: [id], onDelete: SetNull)
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  lastLogin       DateTime?
+
+  // Relations
+  shifts          Shift[]
+  transactions    Transaction[]
+  auditLogs       AuditLog[]
+
+  @@index([stationId])
+  @@index([role])
+  @@index([status])
+}
+
+// ============================================================================
+// STATIONS & INFRASTRUCTURE
+// ============================================================================
+
+model Station {
+  id              String      @id @default(cuid())
+
+  // Basic Info
+  name            String
+  address         String
+  city            String
+  region          String
+  coordinates     String?     // "lat,lng" format
+  phone           String?
+
+  // Ownership & Management
+  directeurId     String
+  directeur       User?       @relation(fields: [directeurId], references: [id], onDelete: Restrict)
+
+  // Station Config
+  operatingHours  Json        // { mon: { open: "06:00", close: "22:00" }, tue: {...} }
+  isActive        Boolean     @default(true)
+
+  // Relations
+  users           User[]
+  pumps           Pump[]
+  tanks           Tank[]
+  shifts          Shift[]
+  inventory       InventoryRecord[]
+  fuelDeliveries  FuelDelivery[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([directeurId])
+  @@index([isActive])
+}
+
+// ============================================================================
+// PUMPS (DISTRIBUTEURS)
+// ============================================================================
+
+enum FuelType {
+  GASOIL         // Diesel
+  ESSENCE        // Petrol/Gasoline
+  GPL            // Liquified Petroleum Gas
+}
+
+model Pump {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String
+  station         Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  pumpNumber      Int         // 1, 2, 3... (physical pump number at station)
+  serialNumber    String?     // Pump serial for maintenance tracking
+
+  // Configuration
+  fuelType        FuelType
+  currentPrice    Decimal     @db.Decimal(10, 2) // MAD per liter, updated daily
+
+  // Meter Reading State
+  currentMeterIndex  Decimal  @db.Decimal(15, 3) // Current pump display in liters
+  lastMeterIndex     Decimal  @db.Decimal(15, 3) // Previous reading
+  lastMeterUpdateAt  DateTime @default(now())
+
+  // Tank Association
+  tankId          String
+  tank            Tank        @relation(fields: [tankId], references: [id], onDelete: Restrict)
+
+  // Status
+  isActive        Boolean     @default(true)
+  isOutOfService  Boolean     @default(false)
+
+  // Relations
+  meterReadings   MeterReading[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([stationId])
+  @@index([fuelType])
+  @@index([tankId])
+  @@unique([stationId, pumpNumber])
+}
+
+// ============================================================================
+// TANKS (CUVES)
+// ============================================================================
+
+model Tank {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String
+  station         Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  tankNumber      Int         // 1, 2, 3...
+  fuelType        FuelType
+
+  // Capacity
+  capacity        Decimal     @db.Decimal(10, 2) // Total capacity in liters
+  minThreshold    Decimal     @db.Decimal(10, 2) // Alert when below this level
+
+  // Current State
+  currentLevel    Decimal     @db.Decimal(10, 2) // Current fuel level in liters
+  lastGaugeAt     DateTime    @default(now())   // Last inventory check time
+
+  // Relations
+  pumps           Pump[]
+  gaugeRecords    TankGaugeRecord[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([stationId])
+  @@index([fuelType])
+}
+
+// ============================================================================
+// SHIFTS (QUARTS DE TRAVAIL)
+// ============================================================================
+
+enum ShiftStatus {
+  OPEN           // Currently in progress
+  CLOSED         // Finalized (no more edits)
+  RECONCILED     // After manual verification by directeur
+  ARCHIVED       // Moved to history
+}
+
+model Shift {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String
+  station         Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+
+  // Timing
+  shiftDate       DateTime    @db.Date // Date of shift (YYYY-MM-DD)
+  startTime       DateTime
+  endTime         DateTime?
+
+  // Personnel
+  pompisteId      String?     // Assigned pump attendant (optional, may be auto-assigned)
+  pompiste        User?       @relation(fields: [pompisteId], references: [id], onDelete: SetNull)
+
+  // Cash Management
+  openingCash     Decimal     @db.Decimal(10, 2) // Cash at shift start (Espèces ouverture)
+  closingCash     Decimal?    @db.Decimal(10, 2) // Cash at shift end (Espèces fermeture)
+
+  // Status
+  status          ShiftStatus @default(OPEN)
+  notes           String?     // Manager notes
+
+  // Relations
+  meterReadings   MeterReading[]
+  transactions    Transaction[]
+  corporateVouchers CorporateVoucherUsage[]
+  tpeTransactions TPETransaction[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  closedBy        String?     // User ID who closed the shift
+  reconciledBy    String?     // User ID who reconciled
+
+  @@index([stationId])
+  @@index([shiftDate])
+  @@index([status])
+  @@index([pompisteId])
+}
+
+// ============================================================================
+// PUMP METER READINGS (RELEVÉS DE COMPTEUR)
+// ============================================================================
+
+model MeterReading {
+  id              String      @id @default(cuid())
+
+  // Identity
+  shiftId         String
+  shift           Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  pumpId          String
+  pump            Pump        @relation(fields: [pumpId], references: [id], onDelete: Restrict)
+
+  // Index Values
+  startIndex      Decimal     @db.Decimal(15, 3) // Index de départ (start meter reading)
+  endIndex        Decimal     @db.Decimal(15, 3) // Index de fin (end meter reading)
+  indexedLiters   Decimal     @db.Decimal(10, 3) // Calculated: endIndex - startIndex
+
+  // Price & Total
+  unitPrice       Decimal     @db.Decimal(10, 2) // Fuel price per liter at time of reading
+  calculatedTotal Decimal     @db.Decimal(12, 2) // indexedLiters × unitPrice
+
+  // Timing
+  recordedAt      DateTime    @default(now())
+
+  @@index([shiftId])
+  @@index([pumpId])
+  @@unique([shiftId, pumpId]) // One reading per pump per shift
+}
+
+// ============================================================================
+// TRANSACTIONS (DETAILED SALES RECORDS)
+// ============================================================================
+
+enum TransactionType {
+  CASH            // Direct cash payment
+  CREDIT          // Corporate voucher (Bon)
+  TPE             // Card payment (Carte Bancaire)
+  TRANSFER        // Internal transfer
+}
+
+model Transaction {
+  id              String      @id @default(cuid())
+
+  // Identity
+  shiftId         String
+  shift           Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  recordedBy      String
+  recordedByUser  User        @relation(fields: [recordedBy], references: [id], onDelete: Restrict)
+
+  // Transaction Details
+  type            TransactionType
+  amount          Decimal     @db.Decimal(12, 2) // Amount in MAD
+  description     String?     // "Pump 2 - Diesel", etc.
+
+  // Timing
+  transactionDate DateTime    @default(now())
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([shiftId])
+  @@index([type])
+  @@index([recordedBy])
+}
+
+// ============================================================================
+// CORPORATE VOUCHERS (BONS/TIRETS - CORPORATE CREDITS)
+// ============================================================================
+
+enum VoucherStatus {
+  AVAILABLE       // Not yet used
+  USED            // Consumed in a transaction
+  EXPIRED         // Validity period passed
+  CANCELLED       // Voided by directeur
+}
+
+model CorporateVoucher {
+  id              String      @id @default(cuid())
+
+  // Identity
+  voucherCode     String      @unique // Unique code for the voucher
+  corporateClientId String
+  corporateClient CorporateClient @relation(fields: [corporateClientId], references: [id], onDelete: Cascade)
+
+  // Value & Terms
+  amount          Decimal     @db.Decimal(10, 2) // Value in MAD
+  validFrom       DateTime
+  validUntil      DateTime
+
+  // Status
+  status          VoucherStatus @default(AVAILABLE)
+
+  // Usage Tracking
+  usageHistory    CorporateVoucherUsage[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([corporateClientId])
+  @@index([status])
+  @@index([validUntil])
+}
+
+model CorporateVoucherUsage {
+  id              String      @id @default(cuid())
+
+  voucherId       String
+  voucher         CorporateVoucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  shiftId         String
+  shift           Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  amountUsed      Decimal     @db.Decimal(10, 2)
+  usedAt          DateTime    @default(now())
+
+  @@index([voucherId])
+  @@index([shiftId])
+}
+
+// ============================================================================
+// TPE TRANSACTIONS (CARTE BANCAIRE / CARD PAYMENTS)
+// ============================================================================
+
+model TPETransaction {
+  id              String      @id @default(cuid())
+
+  // Identity
+  shiftId         String
+  shift           Shift       @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  terminalId      String?     // POS terminal ID if integrated
+
+  // Transaction Details
+  amount          Decimal     @db.Decimal(12, 2) // Amount in MAD
+  cardType        String?     // Visa, Mastercard, etc.
+  cardLastFour    String?     // Last 4 digits of card
+  authorizationCode String?   // From card processor
+
+  // Status
+  isApproved      Boolean     @default(true)
+  processedAt     DateTime    @default(now())
+
+  @@index([shiftId])
+  @@index([processedAt])
+}
+
+// ============================================================================
+// CORPORATE CLIENTS (CLIENTS ENTREPRISE)
+// ============================================================================
+
+model CorporateClient {
+  id              String      @id @default(cuid())
+
+  // Business Info
+  companyName     String
+  registrationId  String      @unique // CNSS/ID number
+  taxId           String?
+
+  // Contact
+  contactEmail    String
+  contactPhone    String
+  contactPerson   String?
+
+  // Account
+  isActive        Boolean     @default(true)
+  creditLimit     Decimal?    @db.Decimal(15, 2) // Max credit allowed
+
+  // Relations
+  vouchers        CorporateVoucher[]
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([isActive])
+}
+
+// ============================================================================
+// INVENTORY & FUEL DELIVERY
+// ============================================================================
+
+enum GaugeType {
+  MANUAL          // Manual measurement with dipstick
+  SENSOR          // Automated sensor reading
+  CALCULATED      // Calculated from meter readings
+}
+
+model TankGaugeRecord {
+  id              String      @id @default(cuid())
+
+  // Identity
+  tankId          String
+  tank            Tank        @relation(fields: [tankId], references: [id], onDelete: Cascade)
+
+  // Reading
+  measuredLevel   Decimal     @db.Decimal(10, 2) // Liters
+  gaugeType       GaugeType   @default(MANUAL)
+  measuredAt      DateTime    @default(now())
+
+  // Verification
+  recordedBy      String?
+  notes           String?
+
+  @@index([tankId])
+  @@index([measuredAt])
+}
+
+model FuelDelivery {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String
+  station         Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  deliveryNumber  String      @unique // Receipt/invoice number
+
+  // Content
+  fuelType        FuelType
+  quantityLiters  Decimal     @db.Decimal(10, 2)
+  unitPrice       Decimal     @db.Decimal(10, 2)
+  totalCost       Decimal     @db.Decimal(12, 2) // quantityLiters × unitPrice
+
+  // Timing
+  deliveryDate    DateTime
+  receivedAt      DateTime?
+
+  // Status
+  isReceived      Boolean     @default(false)
+  receivedBy      String?     // User ID
+
+  // Audit
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([stationId])
+  @@index([fuelType])
+  @@index([deliveryDate])
+}
+
+// ============================================================================
+// INVENTORY RECORDS (DAILY TRACKING)
+// ============================================================================
+
+model InventoryRecord {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String
+  station         Station     @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  recordDate      DateTime    @db.Date
+
+  // Summary (auto-calculated from tank gauges)
+  totalFuelStored Decimal     @db.Decimal(15, 2) // All tanks combined
+  gasoilStored    Decimal     @db.Decimal(10, 2)
+  essenceStored   Decimal     @db.Decimal(10, 2)
+  gplStored       Decimal     @db.Decimal(10, 2)
+
+  // Variations
+  deliveredLiters Decimal     @db.Decimal(10, 2) // Total delivered that day
+  soldLiters      Decimal     @db.Decimal(10, 2) // Total sold that day (from meter readings)
+  discrepancy     Decimal     @db.Decimal(10, 2) // Difference (losses, theft, measurement errors)
+
+  // Audit
+  recordedAt      DateTime    @default(now())
+
+  @@index([stationId])
+  @@index([recordDate])
+  @@unique([stationId, recordDate])
+}
+
+// ============================================================================
+// AUDIT & COMPLIANCE
+// ============================================================================
+
+enum AuditAction {
+  USER_LOGIN
+  SHIFT_OPEN
+  SHIFT_CLOSE
+  SHIFT_RECONCILE
+  TRANSACTION_RECORD
+  VOUCHER_USE
+  INVENTORY_UPDATE
+  USER_PERMISSION_CHANGE
+  REPORT_GENERATED
+  DATA_EXPORT
+}
+
+model AuditLog {
+  id              String      @id @default(cuid())
+
+  // Action Details
+  action          AuditAction
+  userId          String
+  user            User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  // Context
+  entityType      String      // "Shift", "Transaction", "User", etc.
+  entityId        String
+  changes         Json?       // Before/after values for sensitive changes
+
+  // Timestamp
+  timestamp       DateTime    @default(now())
+  ipAddress       String?
+  userAgent       String?
+
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+}
+
+// ============================================================================
+// DAILY END-OF-DAY REPORT (LA FEUILLE DE ROUTE)
+// ============================================================================
+
+model DailyReport {
+  id              String      @id @default(cuid())
+
+  // Identity
+  stationId       String      @unique
+  reportDate      DateTime    @db.Date
+
+  // Summary Stats
+  totalShifts     Int
+  totalRevenue    Decimal     @db.Decimal(15, 2)
+  expectedCash    Decimal     @db.Decimal(15, 2) // Opening + Sales - Credits - TPE
+  actualCash      Decimal     @db.Decimal(15, 2) // Sum of closingCash from all shifts
+  cashDiscrepancy Decimal     @db.Decimal(12, 2) // expectedCash - actualCash
+
+  // Breakdown
+  totalCashSales  Decimal     @db.Decimal(15, 2)
+  totalTPESales   Decimal     @db.Decimal(15, 2)
+  totalVoucherUsage Decimal   @db.Decimal(15, 2)
+
+  // Fuel Summary
+  totalFuelSold   Decimal     @db.Decimal(15, 2)
+  gasoilSold      Decimal     @db.Decimal(12, 2)
+  essenceSold     Decimal     @db.Decimal(12, 2)
+  gplSold         Decimal     @db.Decimal(12, 2)
+
+  // Inventory
+  startingInventory Decimal   @db.Decimal(15, 2)
+  endingInventory   Decimal   @db.Decimal(15, 2)
+  deliveredFuel     Decimal   @db.Decimal(12, 2)
+  inventoryLoss     Decimal   @db.Decimal(12, 2)
+
+  // Approval
+  isApproved      Boolean     @default(false)
+  approvedBy      String?
+  approvalNotes   String?
+
+  // Audit
+  generatedAt     DateTime    @default(now())
+  exportedAt      DateTime?
+
+  @@index([stationId])
+  @@index([reportDate])
+}
