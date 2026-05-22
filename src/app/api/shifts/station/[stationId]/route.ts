@@ -86,14 +86,15 @@ async function handler(
   }
 }
 
-export function GET(
+export async function GET(
   request: NextRequest,
-  { params }: { params: { stationId: string } }
+  { params }: { params: Promise<{ stationId: string }> }
 ) {
+  const resolvedParams = await params;
   return withAuth(
     request,
-    (req, user, p) => handler(req, user, p || params),
+    (req, user, p) => handler(req, user, p || resolvedParams),
     ['directeur'],
-    params
+    resolvedParams
   );
 }
