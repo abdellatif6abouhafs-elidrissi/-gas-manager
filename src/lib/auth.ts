@@ -41,7 +41,7 @@ export const authOptions: NextAuthOptions = {
             name: `${user.firstName} ${user.lastName}`,
             role: user.role,
             station: user.station?.toString(),
-          } as any;
+          };
         } catch (error) {
           throw new Error(
             error instanceof Error ? error.message : 'Authentication failed'
@@ -53,16 +53,16 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.role = (user as any).role;
-        token.station = (user as any).station;
+        token.role = user.role;
+        token.station = user.station;
       }
       return token;
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).role = token.role;
-        (session.user as any).station = token.station;
-        (session.user as any).id = token.sub;
+        session.user.role = token.role;
+        session.user.station = token.station;
+        session.user.id = token.sub;
       }
       return session;
     },
