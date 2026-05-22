@@ -28,6 +28,14 @@ interface Sale {
   createdAt: string;
 }
 
+interface Product {
+  _id: string;
+  productType: 'oil' | 'air' | 'car_wash' | 'accessories' | 'other';
+  quantity: number;
+  amountMAD: number;
+  createdAt: string;
+}
+
 export default function GerantDashboard() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -35,16 +43,21 @@ export default function GerantDashboard() {
   const [shiftSummary, setShiftSummary] = useState<ShiftSummary | null>(null);
   const [todaysShifts, setTodaysShifts] = useState<Shift[]>([]);
   const [activeSales, setActiveSales] = useState<Sale[]>([]);
+  const [activeProducts, setActiveProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [showOpenModal, setShowOpenModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [showRecordSaleModal, setShowRecordSaleModal] = useState(false);
+  const [showRecordProductModal, setShowRecordProductModal] = useState(false);
   const [openingCash, setOpeningCash] = useState('');
   const [closingCash, setClosingCash] = useState('');
   const [pumpNumber, setPumpNumber] = useState('');
   const [fuelType, setFuelType] = useState<'gasoil' | 'essence' | 'gpl'>('gasoil');
   const [liters, setLiters] = useState('');
   const [amountMAD, setAmountMAD] = useState('');
+  const [productType, setProductType] = useState<'oil' | 'air' | 'car_wash' | 'accessories' | 'other'>('oil');
+  const [productQuantity, setProductQuantity] = useState('');
+  const [productAmount, setProductAmount] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -185,6 +198,61 @@ export default function GerantDashboard() {
     }
   };
 
+  const handleRecordProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeShift) return;
+
+    setSubmitting(true);
+    setError('');
+
+    try {
+      const newProduct = {
+        _id: Date.now().toString(),
+        productType,
+        quantity: parseInt(productQuantity),
+        amountMAD: parseFloat(productAmount),
+        createdAt: new Date().toISOString(),
+      } as Product;
+
+      const response = await fetch('/api/products/record', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shiftId: activeShift._id,
+          productType,
+          quantity: newProduct.quantity,
+          amountMAD: newProduct.amountMAD,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to record product sale');
+      }
+
+      setShowRecordProductModal(false);
+      setProductType('oil');
+      setProductQuantity('');
+      setProductAmount('');
+
+      const updatedProducts = [...activeProducts, newProduct];
+      setActiveProducts(updatedProducts);
+      const productRevenue = updatedProducts.reduce((sum, prod) => sum + prod.amountMAD, 0);
+
+      if (shiftSummary) {
+        setShiftSummary({
+          ...shiftSummary,
+          totalSales: shiftSummary.totalSales + newProduct.amountMAD,
+        });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleCloseShift = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeShift) return;
@@ -291,7 +359,13 @@ export default function GerantDashboard() {
                   onClick={() => setShowRecordSaleModal(true)}
                   className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium"
                 >
-                  Record Sale
+                  Record Fuel Sale
+                </button>
+                <button
+                  onClick={() => setShowRecordProductModal(true)}
+                  className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium"
+                >
+                  Record Product
                 </button>
                 <button
                   onClick={() => setShowCloseModal(true)}
@@ -628,6 +702,98 @@ export default function GerantDashboard() {
                   className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-lg font-medium"
                 >
                   {submitting ? 'Recording...' : 'Record Sale'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Record Product Modal */}
+      {showRecordProductModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-lg max-w-md w-full p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">
+              Record Product Sale
+            </h3>
+            <form onSubmit={handleRecordProduct} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Product Type
+                </label>
+                <select
+                  value={productType}
+                  onChange={(e) => setProductType(e.target.value as 'oil' | 'air' | 'car_wash' | 'accessories' | 'other')}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                >
+                  <option value="oil">Engine Oil</option>
+                  <option value="air">Air Service</option>
+                  <option value="car_wash">Car Wash</option>
+                  <option value="accessories">Accessories</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Quantity
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={productQuantity}
+                  onChange={(e) => setProductQuantity(e.target.value)}
+                  placeholder="Enter quantity"
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Amount (MAD)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={productAmount}
+                  onChange={(e) => setProductAmount(e.target.value)}
+                  placeholder="Enter amount"
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                />
+              </div>
+
+              {productQuantity && productAmount && (
+                <div className="bg-green-50 rounded-lg p-3">
+                  <p className="text-xs text-gray-600 mb-1">Price per unit:</p>
+                  <p className="text-lg font-bold text-green-900">
+                    {(parseFloat(productAmount) / parseFloat(productQuantity)).toFixed(2)} MAD
+                  </p>
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecordProductModal(false);
+                    setProductType('oil');
+                    setProductQuantity('');
+                    setProductAmount('');
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 font-medium hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white rounded-lg font-medium"
+                >
+                  {submitting ? 'Recording...' : 'Record Product'}
                 </button>
               </div>
             </form>
