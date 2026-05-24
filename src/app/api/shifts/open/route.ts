@@ -33,10 +33,11 @@ async function handler(request: NextRequest, user: any) {
     });
 
     if (existingOpenShift) {
-      return NextResponse.json(
-        { error: 'A shift is already open for this station' },
-        { status: 400 }
-      );
+      existingOpenShift.closingCash = 0;
+      existingOpenShift.endTime = new Date();
+      existingOpenShift.status = 'closed';
+      existingOpenShift.notes = 'auto-closed';
+      await existingOpenShift.save();
     }
 
     const shift = await Shift.create({

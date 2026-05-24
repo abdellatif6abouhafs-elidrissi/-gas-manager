@@ -10,6 +10,7 @@ export interface IShift extends Document {
   openingCash: number;
   closingCash?: number;
   status: ShiftStatus;
+  notes?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -46,6 +47,9 @@ const shiftSchema = new Schema<IShift>(
       type: String,
       enum: ['open', 'closed'],
       default: 'open',
+    },
+    notes: {
+      type: String,
     },
   },
   {
